@@ -61,12 +61,12 @@ public class EnetUnetTransport : INetworkTransport
             if (!string.IsNullOrEmpty(ip))
             {
                 address.SetHost(ip);
-                tempHost.Create(address, maxConnections, config.ChannelCount);
+                tempHost.Create(address, maxConnections);
             }
             else if (port > 0)
             {
                 address.Port = (ushort)port;
-                tempHost.Create(address, maxConnections, config.ChannelCount);
+                tempHost.Create(address, maxConnections);
             }
             else
             {
@@ -309,9 +309,9 @@ public class EnetUnetTransport : INetworkTransport
         foreach (var hostByConfig in hostsByConfig)
         {
             hostByConfig.Service(0, out tempEvent);
-            hostByConfig.Flush();
             eventType = NetworkEventType.Nothing;
             channelId = tempEvent.ChannelID;
+            
             switch (tempEvent.Type)
             {
                 case ENet.EventType.Connect:
@@ -337,7 +337,6 @@ public class EnetUnetTransport : INetworkTransport
                     var length = tempEvent.Packet.Length;
                     if (length <= bufferSize)
                     {
-                        Debug.LogError("received " + length);
                         tempEvent.Packet.CopyTo(buffer);
                         receivedSize = length;
                     }
@@ -452,14 +451,12 @@ public class EnetUnetTransport : INetworkTransport
                 packetFlag = PacketFlags.None;
                 break;
         }
-        Packet packet = default(Packet);
+        Packet packet = new Packet();
         byte[] data = new byte[size];
         System.Buffer.BlockCopy(buffer, 0, data, 0, size);
         packet.Create(data, size, packetFlag);
-        tempPeer = connections[hostId][connectionId];
-        connections[hostId][connectionId].Send((byte)channelId, ref packet);
         error = (byte)NetworkError.Ok;
-        return true;
+        return connections[hostId][connectionId].Send(0, ref packet);
     }
 
     public void SetBroadcastCredentials(int hostId, int key, int version, int subversion, out byte error)
