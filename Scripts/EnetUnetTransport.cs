@@ -17,17 +17,14 @@ public class EnetUnetTransport : INetworkTransport
     private int nextHostId = 1;
     private int tempHostId;
     private bool isStarted;
-    private Thread pollEventThread;
-    private bool isPollEventRunning;
     private GlobalConfig globalConfig;
     private Dictionary<int, HostTopology> topologies = new Dictionary<int, HostTopology>();
     private Dictionary<int, Dictionary<int, Host>> hosts = new Dictionary<int, Dictionary<int, Host>>();
     private Dictionary<int, Dictionary<int, Peer>> connections = new Dictionary<int, Dictionary<int, Peer>>();
     private Dictionary<uint, int> connectionIds = new Dictionary<uint, int>();
-    private Dictionary<int, Queue<ENet.Event>> hostEvents = new Dictionary<int, Queue<ENet.Event>>();
-    private Queue<int> updatedHostEventQueue = new Queue<int>();
     private Host tempHost;
     private Peer tempPeer;
+    private ENet.Event tempEvent;
 
     public bool IsStarted
     {
@@ -55,19 +52,28 @@ public class EnetUnetTransport : INetworkTransport
         // Create new host with its event listener
         tempHost = new Host();
 
-        if (specialConnectionId == 0)
+        if (specialConnectionId > 0)
+        {
+            tempHost.Create();
+        }
+        else
         {
             if (!string.IsNullOrEmpty(ip))
             {
                 address.SetHost(ip);
+                tempHost.Create(address, maxConnections, config.ChannelCount);
             }
             else if (port > 0)
             {
                 address.Port = (ushort)port;
+                tempHost.Create(address, maxConnections, config.ChannelCount);
+            }
+            else
+            {
+                tempHost.Create();
             }
         }
 
-        tempHost.Create(address, maxConnections, config.ChannelCount);
         if (!hosts.ContainsKey(hostId))
             hosts.Add(hostId, new Dictionary<int, Host>());
         hosts[hostId][specialConnectionId] = tempHost;
@@ -231,9 +237,18 @@ public class EnetUnetTransport : INetworkTransport
     public int GetCurrentRTT(int hostId, int connectionId, out byte error)
     {
         // Return the round trip time for the given connectionId.
-        // TODO: implement this
+        if (!connections.ContainsKey(hostId))
+        {
+            error = (byte)NetworkError.WrongHost;
+            return 0;
+        }
+        if (!connections[hostId].ContainsKey(connectionId))
+        {
+            error = (byte)NetworkError.WrongConnection;
+            return 0;
+        }
         error = (byte)NetworkError.Ok;
-        return 0;
+        return (int)connections[hostId][connectionId].RoundTripTime;
     }
 
     public void Init()
@@ -241,12 +256,6 @@ public class EnetUnetTransport : INetworkTransport
         // Initializes the object implementing INetworkTransport. Must be called before doing any other
         // operations on the object.
         Debug.Log("[" + TAG + "] Init() globalConfig=" + (globalConfig != null));
-        if (!isPollEventRunning)
-        {
-            pollEventThread = new Thread(new ThreadStart(PollEventThreadFunction));
-            pollEventThread.Start();
-            isPollEventRunning = true;
-        }
         // Init default transport to make everything works, this is HACK
         // I actually don't know what I have to do with init function
         NetworkManager.defaultTransport.Init();
@@ -269,11 +278,16 @@ public class EnetUnetTransport : INetworkTransport
         channelId = 0;
         receivedSize = 0;
         error = (byte)NetworkError.Ok;
-        if (updatedHostEventQueue.Count > 0)
-            hostId = updatedHostEventQueue.Dequeue();
-        else
-            return NetworkEventType.Nothing;
-        return ReceiveFromHost(hostId, out connectionId, out channelId, buffer, bufferSize, out receivedSize, out error);
+        foreach (var currentHostId in hosts.Keys)
+        {
+            var result = ReceiveFromHost(currentHostId, out connectionId, out channelId, buffer, bufferSize, out receivedSize, out error);
+            if (result != NetworkEventType.Nothing)
+            {
+                hostId = currentHostId;
+                return result;
+            }
+        }
+        return NetworkEventType.Nothing;
     }
 
     public NetworkEventType ReceiveFromHost(int hostId, out int connectionId, out int channelId, byte[] buffer, int bufferSize, out int receivedSize, out byte error)
@@ -290,49 +304,61 @@ public class EnetUnetTransport : INetworkTransport
             return NetworkEventType.Nothing;
         }
 
-        // Receive events data after poll events, and send out data
-        if (!hostEvents.TryGetValue(hostId, out Queue<ENet.Event> eventQueue) ||
-            eventQueue.Count <= 0)
-            return NetworkEventType.Nothing;
-
-        var eventType = NetworkEventType.Nothing;
-        var eventData = eventQueue.Dequeue();
-        channelId = eventData.ChannelID;
-        switch (eventData.Type)
+        NetworkEventType eventType;
+        var hostsByConfig = hosts[hostId].Values;
+        foreach (var hostByConfig in hostsByConfig)
         {
-            case ENet.EventType.Connect:
-                eventType = NetworkEventType.ConnectEvent;
-                if (!connectionIds.ContainsKey(eventData.Peer.ID))
-                {
-                    connectionId = nextConnectionId++;
-                    AddConnection(hostId, connectionId, eventData.Peer);
-                }
-                break;
+            hostByConfig.Service(0, out tempEvent);
+            hostByConfig.Flush();
+            eventType = NetworkEventType.Nothing;
+            channelId = tempEvent.ChannelID;
+            switch (tempEvent.Type)
+            {
+                case ENet.EventType.Connect:
+                    eventType = NetworkEventType.ConnectEvent;
+                    if (!connectionIds.ContainsKey(tempEvent.Peer.ID))
+                    {
+                        connectionId = nextConnectionId++;
+                        AddConnection(hostId, connectionId, tempEvent.Peer);
+                    }
+                    break;
 
-            case ENet.EventType.Disconnect:
-                eventType = NetworkEventType.DisconnectEvent;
-                break;
+                case ENet.EventType.Disconnect:
+                    eventType = NetworkEventType.DisconnectEvent;
+                    break;
 
-            case ENet.EventType.Timeout:
-                eventType = NetworkEventType.DisconnectEvent;
-                error = (byte)NetworkError.Timeout;
-                break;
+                case ENet.EventType.Timeout:
+                    eventType = NetworkEventType.DisconnectEvent;
+                    error = (byte)NetworkError.Timeout;
+                    break;
 
-            case ENet.EventType.Receive:
-                eventType = NetworkEventType.DataEvent;
-                var length = eventData.Packet.Length;
-                if (length <= bufferSize)
-                {
-                    eventData.Packet.CopyTo(buffer);
-                    receivedSize = length;
-                }
-                else
-                    error = (byte)NetworkError.MessageToLong;
-                eventData.Packet.Dispose();
-                break;
+                case ENet.EventType.Receive:
+                    eventType = NetworkEventType.DataEvent;
+                    var length = tempEvent.Packet.Length;
+                    if (length <= bufferSize)
+                    {
+                        Debug.LogError("received " + length);
+                        tempEvent.Packet.CopyTo(buffer);
+                        receivedSize = length;
+                    }
+                    else
+                        error = (byte)NetworkError.MessageToLong;
+                    tempEvent.Packet.Dispose();
+                    break;
+            }
+
+            if (eventType != NetworkEventType.Nothing)
+            {
+                connectionId = connectionIds[tempEvent.Peer.ID];
+                return eventType;
+            }
         }
-        connectionId = connectionIds[eventData.Peer.ID];
-        return eventType;
+
+        // If event is nothing set default data
+        connectionId = 0;
+        channelId = 0;
+        receivedSize = 0;
+        return NetworkEventType.Nothing;
     }
 
     public NetworkEventType ReceiveRelayEventFromHost(int hostId, out byte error)
@@ -365,6 +391,7 @@ public class EnetUnetTransport : INetworkTransport
             var tempHosts = hosts[hostId].ToArray();
             foreach (var entry in tempHosts)
             {
+                entry.Value.Flush();
                 entry.Value.Dispose();
                 hosts[hostId].Remove(entry.Key);
             }
@@ -392,23 +419,44 @@ public class EnetUnetTransport : INetworkTransport
         switch (topologies[hostId].DefaultConfig.Channels[channelId].QOS)
         {
             case QosType.AllCostDelivery:
-            case QosType.ReliableStateUpdate:
+                packetFlag = PacketFlags.Reliable & PacketFlags.UnreliableFragment;
+                break;
+            case QosType.Reliable:
+                packetFlag = PacketFlags.Reliable & PacketFlags.Unsequenced;
+                break;
+            case QosType.ReliableFragmented:
+                packetFlag = PacketFlags.Reliable & PacketFlags.UnreliableFragment & PacketFlags.Unsequenced;
+                break;
             case QosType.ReliableFragmentedSequenced:
+                packetFlag = PacketFlags.Reliable & PacketFlags.UnreliableFragment;
+                break;
             case QosType.ReliableSequenced:
                 packetFlag = PacketFlags.Reliable;
                 break;
-            case QosType.Reliable:
-            case QosType.ReliableFragmented:
-                packetFlag = PacketFlags.Unsequenced;
+            case QosType.ReliableStateUpdate:
+                packetFlag = PacketFlags.Reliable;
+                break;
+            case QosType.StateUpdate:
+                packetFlag = PacketFlags.None;
+                break;
+            case QosType.Unreliable:
+                packetFlag = PacketFlags.None & PacketFlags.Unsequenced;
+                break;
+            case QosType.UnreliableFragmented:
+                packetFlag = PacketFlags.None & PacketFlags.UnreliableFragment;
                 break;
             case QosType.UnreliableFragmentedSequenced:
-                packetFlag = PacketFlags.UnreliableFragment;
+                packetFlag = PacketFlags.None & PacketFlags.UnreliableFragment & PacketFlags.Unsequenced;
+                break;
+            case QosType.UnreliableSequenced:
+                packetFlag = PacketFlags.None;
                 break;
         }
         Packet packet = default(Packet);
         byte[] data = new byte[size];
         System.Buffer.BlockCopy(buffer, 0, data, 0, size);
-        packet.Create(data);
+        packet.Create(data, size, packetFlag);
+        tempPeer = connections[hostId][connectionId];
         connections[hostId][connectionId].Send((byte)channelId, ref packet);
         error = (byte)NetworkError.Ok;
         return true;
@@ -441,11 +489,6 @@ public class EnetUnetTransport : INetworkTransport
         hosts.Clear();
         nextConnectionId = 1;
         nextHostId = 1;
-        if (isPollEventRunning)
-        {
-            isPollEventRunning = false;
-            pollEventThread.Abort();
-        }
     }
 
     public bool StartBroadcastDiscovery(int hostId, int broadcastPort, int key, int version, int subversion, byte[] buffer, int size, int timeout, out byte error)
@@ -460,33 +503,5 @@ public class EnetUnetTransport : INetworkTransport
         // Stops sending the broadcast discovery message across all local subnets.
         Debug.LogError("[" + TAG + "] StopBroadcastDiscovery() not implemented");
         throw new System.NotImplementedException();
-    }
-
-    private void PollEventThreadFunction()
-    {
-        while (isPollEventRunning)
-        {
-            lock (hosts)
-            {
-                foreach (var host in hosts)
-                {
-                    var hostsByConfig = host.Value.Values;
-                    lock (hostsByConfig)
-                    {
-                        foreach (var hostByConfig in hostsByConfig)
-                        {
-                            hostByConfig.Service(15, out ENet.Event netEvent);
-                            lock (hostEvents)
-                            {
-                                if (!hostEvents.ContainsKey(host.Key))
-                                    hostEvents.Add(host.Key, new Queue<ENet.Event>());
-                                hostEvents[host.Key].Enqueue(netEvent);
-                            }
-                        }
-                    }
-                }
-            }
-            Thread.Sleep(15);
-        }
     }
 }
