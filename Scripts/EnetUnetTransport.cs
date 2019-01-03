@@ -418,16 +418,16 @@ public class EnetUnetTransport : INetworkTransport
         switch (topologies[hostId].DefaultConfig.Channels[channelId].QOS)
         {
             case QosType.AllCostDelivery:
-                packetFlag = PacketFlags.Reliable & PacketFlags.UnreliableFragment;
+                packetFlag = PacketFlags.Reliable | PacketFlags.UnreliableFragment;
                 break;
             case QosType.Reliable:
-                packetFlag = PacketFlags.Reliable & PacketFlags.Unsequenced;
+                packetFlag = PacketFlags.Reliable | PacketFlags.Unsequenced;
                 break;
             case QosType.ReliableFragmented:
-                packetFlag = PacketFlags.Reliable & PacketFlags.UnreliableFragment & PacketFlags.Unsequenced;
+                packetFlag = PacketFlags.Reliable | PacketFlags.UnreliableFragment | PacketFlags.Unsequenced;
                 break;
             case QosType.ReliableFragmentedSequenced:
-                packetFlag = PacketFlags.Reliable & PacketFlags.UnreliableFragment;
+                packetFlag = PacketFlags.Reliable | PacketFlags.UnreliableFragment;
                 break;
             case QosType.ReliableSequenced:
                 packetFlag = PacketFlags.Reliable;
@@ -439,13 +439,13 @@ public class EnetUnetTransport : INetworkTransport
                 packetFlag = PacketFlags.None;
                 break;
             case QosType.Unreliable:
-                packetFlag = PacketFlags.None & PacketFlags.Unsequenced;
+                packetFlag = PacketFlags.None | PacketFlags.Unsequenced;
                 break;
             case QosType.UnreliableFragmented:
-                packetFlag = PacketFlags.None & PacketFlags.UnreliableFragment;
+                packetFlag = PacketFlags.None | PacketFlags.UnreliableFragment;
                 break;
             case QosType.UnreliableFragmentedSequenced:
-                packetFlag = PacketFlags.None & PacketFlags.UnreliableFragment & PacketFlags.Unsequenced;
+                packetFlag = PacketFlags.None | PacketFlags.UnreliableFragment | PacketFlags.Unsequenced;
                 break;
             case QosType.UnreliableSequenced:
                 packetFlag = PacketFlags.None;
